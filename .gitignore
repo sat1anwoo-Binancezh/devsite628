@@ -14,6 +14,7 @@ __pycache__/
 # Build and cache outputs
 dist/
 build/
+release/
 .next/
 .nuxt/
 .svelte-kit/

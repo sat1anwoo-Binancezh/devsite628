@@ -3,11 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "electron-main.js",
   "scripts": {
     "dev": "concurrently \"npm:server\" \"npm:client\"",
     "client": "vite --host 0.0.0.0",
     "server": "node server/index.js",
-    "build": "vite build"
+    "build": "vite build",
+    "electron": "npm run build && electron .",
+    "pack": "npm run build && electron-builder --win portable --x64"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
@@ -21,6 +24,33 @@
     "vite": "^7.0.0"
   },
   "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
     "playwright": "^1.60.0"
+  },
+  "build": {
+    "appId": "com.ikunance.mailnotifier.beta",
+    "productName": "IKUNANCE Mail Notifier Beta",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "server/**/*",
+      "electron-main.js",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
   }
 }

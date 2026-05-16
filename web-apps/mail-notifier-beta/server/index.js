@@ -1,12 +1,9 @@
 import express from 'express'
 import cors from 'cors'
 import { ImapFlow } from 'imapflow'
+import { pathToFileURL } from 'node:url'
 
-const app = express()
 const PORT = Number(process.env.MAIL_NOTIFIER_PORT || 5178)
-
-app.use(cors())
-app.use(express.json({ limit: '1mb' }))
 
 const PROVIDERS = {
   qq: { host: 'imap.qq.com', port: 993, secure: true, inboxUrl: 'https://mail.qq.com/' },
@@ -63,71 +60,87 @@ function serializeMessage(msg) {
   }
 }
 
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'mail-notifier-beta' })
-})
+export function createServerApp() {
+  const app = express()
 
-app.post('/api/test', async (req, res) => {
-  const config = normalizeConfig(req.body)
-  if (!config.email || !config.password || !config.host) {
-    res.status(400).json({ status: 'error', message: '请填写邮箱、授权码和 IMAP 主机' })
-    return
-  }
+  app.use(cors())
+  app.use(express.json({ limit: '1mb' }))
 
-  try {
-    const result = await withClient(config, async client => {
-      const lock = await client.getMailboxLock(config.mailbox)
-      try {
-        const status = await client.status(config.mailbox, { messages: true, unseen: true, uidNext: true })
-        return status
-      } finally {
-        lock.release()
-      }
-    })
-    res.json({ status: 'success', config: publicConfig(config), mailbox: result })
-  } catch (error) {
-    res.status(502).json({ status: 'error', message: error.message || 'IMAP 连接失败' })
-  }
-})
+  app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok', service: 'mail-notifier-beta' })
+  })
 
-app.post('/api/check', async (req, res) => {
-  const config = normalizeConfig(req.body.config)
-  const sinceUid = Number(req.body.sinceUid || 0)
-  const limit = Math.max(1, Math.min(Number(req.body.limit || 30), 80))
+  app.post('/api/test', async (req, res) => {
+    const config = normalizeConfig(req.body)
+    if (!config.email || !config.password || !config.host) {
+      res.status(400).json({ status: 'error', message: '请填写邮箱、授权码和 IMAP 主机' })
+      return
+    }
 
-  if (!config.email || !config.password || !config.host) {
-    res.status(400).json({ status: 'error', message: '邮箱未绑定' })
-    return
-  }
-
-  try {
-    const data = await withClient(config, async client => {
-      const lock = await client.getMailboxLock(config.mailbox)
-      try {
-        const status = await client.status(config.mailbox, { messages: true, unseen: true, uidNext: true })
-        const range = status.messages > limit ? `${status.messages - limit + 1}:*` : '1:*'
-        const messages = []
-        for await (const msg of client.fetch(range, { uid: true, envelope: true, flags: true })) {
-          messages.push(serializeMessage(msg))
+    try {
+      const result = await withClient(config, async client => {
+        const lock = await client.getMailboxLock(config.mailbox)
+        try {
+          const status = await client.status(config.mailbox, { messages: true, unseen: true, uidNext: true })
+          return status
+        } finally {
+          lock.release()
         }
-        messages.sort((a, b) => b.uid - a.uid)
-        const newMessages = sinceUid ? messages.filter(item => item.uid > sinceUid) : []
-        return {
-          mailbox: status,
-          latestUid: messages[0]?.uid || sinceUid || 0,
-          messages,
-          newMessages,
-        }
-      } finally {
-        lock.release()
-      }
-    })
-    res.json({ status: 'success', ...data })
-  } catch (error) {
-    res.status(502).json({ status: 'error', message: error.message || '查收失败' })
-  }
-})
+      })
+      res.json({ status: 'success', config: publicConfig(config), mailbox: result })
+    } catch (error) {
+      res.status(502).json({ status: 'error', message: error.message || 'IMAP 连接失败' })
+    }
+  })
 
-app.listen(PORT, () => {
-  console.log(`mail-notifier-beta api listening on http://localhost:${PORT}`)
-})
+  app.post('/api/check', async (req, res) => {
+    const config = normalizeConfig(req.body.config)
+    const sinceUid = Number(req.body.sinceUid || 0)
+    const limit = Math.max(1, Math.min(Number(req.body.limit || 30), 80))
+
+    if (!config.email || !config.password || !config.host) {
+      res.status(400).json({ status: 'error', message: '邮箱未绑定' })
+      return
+    }
+
+    try {
+      const data = await withClient(config, async client => {
+        const lock = await client.getMailboxLock(config.mailbox)
+        try {
+          const status = await client.status(config.mailbox, { messages: true, unseen: true, uidNext: true })
+          const range = status.messages > limit ? `${status.messages - limit + 1}:*` : '1:*'
+          const messages = []
+          for await (const msg of client.fetch(range, { uid: true, envelope: true, flags: true })) {
+            messages.push(serializeMessage(msg))
+          }
+          messages.sort((a, b) => b.uid - a.uid)
+          const newMessages = sinceUid ? messages.filter(item => item.uid > sinceUid) : []
+          return {
+            mailbox: status,
+            latestUid: messages[0]?.uid || sinceUid || 0,
+            messages,
+            newMessages,
+          }
+        } finally {
+          lock.release()
+        }
+      })
+      res.json({ status: 'success', ...data })
+    } catch (error) {
+      res.status(502).json({ status: 'error', message: error.message || '查收失败' })
+    }
+  })
+
+  return app
+}
+
+export function startServer(port = PORT) {
+  const app = createServerApp()
+  return app.listen(port, () => {
+    console.log(`mail-notifier-beta api listening on http://localhost:${port}`)
+  })
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  startServer()
+}
