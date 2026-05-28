@@ -273,7 +273,7 @@ namespace SimpleMailReminder
         public int Port = 993;
         public string Mailbox = "INBOX";
         public string WebmailUrl = "https://mail.qq.com/";
-        public int IntervalSeconds = 10;
+        public int IntervalSeconds = 2;
         public string SoundPath = "";
         public string Theme = "ikun";
 
@@ -316,7 +316,7 @@ namespace SimpleMailReminder
                 if (key == "Port") settings.Port = ToInt(value, 993);
                 if (key == "Mailbox") settings.Mailbox = value;
                 if (key == "WebmailUrl") settings.WebmailUrl = value;
-                if (key == "IntervalSeconds") settings.IntervalSeconds = ToInt(value, 10);
+                if (key == "IntervalSeconds") settings.IntervalSeconds = ToInt(value, 2);
                 if (key == "SoundPath") settings.SoundPath = value;
                 if (key == "Theme") settings.Theme = value;
             }
@@ -908,8 +908,9 @@ namespace SimpleMailReminder
         private readonly List<Label> labels = new List<Label>();
         private readonly List<Button> buttons = new List<Button>();
         private readonly List<SectionPanel> sections = new List<SectionPanel>();
-        private const int ImmediatePollIntervalSeconds = 10;
-        private const int ImmediatePollIntervalMs = ImmediatePollIntervalSeconds * 1000;
+        private const int QuarterWindowPollIntervalSeconds = 2;
+        private const int QuarterWindowPollIntervalMs = QuarterWindowPollIntervalSeconds * 1000;
+        private const int QuietScansBeforeWindowAlert = 2;
         private ComboBox themeBox;
         private ComboBox providerBox;
         private TextBox emailBox;
@@ -936,6 +937,10 @@ namespace SimpleMailReminder
         private bool monitoring;
         private bool exitRequested;
         private long lastSeenUid;
+        private readonly List<MessageInfo> quarterWindowBatch = new List<MessageInfo>();
+        private string activeQuarterSlotKey = "";
+        private string flushedQuarterSlotKey = "";
+        private int quietWindowScans;
         private int rgbHue;
         private AlertForm activeAlert;
 
@@ -944,13 +949,7 @@ namespace SimpleMailReminder
             BuildProviders();
             BuildUi();
             LoadSettings(AppSettings.Load());
-            pollTimer.Tick += delegate
-            {
-                if (monitoring && !checking)
-                {
-                    CheckMail(true, false, "即时扫描");
-                }
-            };
+            pollTimer.Tick += delegate { RunQuarterWindowScan(); };
             themeTimer.Interval = 90;
             themeTimer.Tick += delegate
             {
@@ -1069,11 +1068,11 @@ namespace SimpleMailReminder
             AddField(settingsPanel, "查阅链接", webmailBox, left, top + row * 5, 104, 300);
 
             intervalBox = new NumericUpDown();
-            intervalBox.Minimum = 10;
+            intervalBox.Minimum = 1;
             intervalBox.Maximum = 3600;
-            intervalBox.Value = ImmediatePollIntervalSeconds;
+            intervalBox.Value = QuarterWindowPollIntervalSeconds;
             intervalBox.Enabled = false;
-            AddField(settingsPanel, "即时扫描", intervalBox, left, top + row * 6, 104, 112);
+            AddField(settingsPanel, "窗口扫描", intervalBox, left, top + row * 6, 104, 112);
 
             soundBox = new TextBox();
             AddField(settingsPanel, "提示音 WAV", soundBox, left, top + row * 7, 104, 218);
@@ -1322,7 +1321,7 @@ namespace SimpleMailReminder
             portBox.Text = settings.Port.ToString();
             mailboxBox.Text = settings.Mailbox;
             webmailBox.Text = settings.WebmailUrl;
-            intervalBox.Value = ImmediatePollIntervalSeconds;
+            intervalBox.Value = QuarterWindowPollIntervalSeconds;
             soundBox.Text = settings.SoundPath;
         }
 
@@ -1413,13 +1412,65 @@ namespace SimpleMailReminder
             AppSettings settings = ReadSettings();
             if (!ValidateSettings(settings)) return;
             settings.Save();
-            pollTimer.Interval = ImmediatePollIntervalMs;
+            pollTimer.Interval = QuarterWindowPollIntervalMs;
             pendingAlerts.Clear();
+            quarterWindowBatch.Clear();
+            activeQuarterSlotKey = "";
+            flushedQuarterSlotKey = "";
+            quietWindowScans = 0;
             lastSeenUid = 0;
             CheckMail(false, true, "启动监听");
         }
 
+        private void RunQuarterWindowScan()
+        {
+            if (!monitoring || checking) return;
+
+            DateTime now = DateTime.Now;
+            string slotKey = GetQuarterWindowSlotKey(now);
+            if (string.IsNullOrEmpty(slotKey))
+            {
+                if (quarterWindowBatch.Count > 0)
+                {
+                    FlushQuarterWindowBatch("窗口结束");
+                }
+                activeQuarterSlotKey = "";
+                quietWindowScans = 0;
+                return;
+            }
+
+            if (activeQuarterSlotKey != slotKey)
+            {
+                if (quarterWindowBatch.Count > 0)
+                {
+                    FlushQuarterWindowBatch("新窗口开始前");
+                }
+                activeQuarterSlotKey = slotKey;
+                quietWindowScans = 0;
+                WriteActivityLog("quarter window opened slot=" + slotKey);
+            }
+
+            if (slotKey == flushedQuarterSlotKey) return;
+
+            CheckMail(true, false, "窗口扫描 " + now.ToString("HH:mm:ss"), true);
+        }
+
+        internal static string GetQuarterWindowSlotKey(DateTime time)
+        {
+            if (time.Second < 0 || time.Second > 59) return "";
+            if (time.Minute == 0 || time.Minute == 15 || time.Minute == 30 || time.Minute == 45)
+            {
+                return time.ToString("yyyyMMddHHmm");
+            }
+            return "";
+        }
+
         private void CheckMail(bool alertNew, bool baseline, string action)
+        {
+            CheckMail(alertNew, baseline, action, false);
+        }
+
+        private void CheckMail(bool alertNew, bool baseline, string action, bool collectForQuarterWindow)
         {
             if (checking)
             {
@@ -1435,7 +1486,7 @@ namespace SimpleMailReminder
             statusLight.StatusText = "Checking";
             ApplyTheme();
             SetStatus(action + "中...");
-            WriteActivityLog(action + " start; baseline=" + baseline + "; alertNew=" + alertNew + "; lastSeenUid=" + lastSeenUid);
+            WriteActivityLog(action + " start; baseline=" + baseline + "; alertNew=" + alertNew + "; collectWindow=" + collectForQuarterWindow + "; lastSeenUid=" + lastSeenUid);
             long sinceUid = alertNew && !baseline ? lastSeenUid : 0;
             int fetchLimit = sinceUid > 0 ? 0 : 20;
 
@@ -1454,24 +1505,24 @@ namespace SimpleMailReminder
                             WriteActivityLog(action + " failed: " + task.Exception.GetBaseException().Message);
                             return;
                         }
-                        HandleCheckResult(task.Result, alertNew, baseline, action);
+                        HandleCheckResult(task.Result, alertNew, baseline, action, collectForQuarterWindow);
                     }));
                 });
         }
 
-        private void HandleCheckResult(MailCheckResult result, bool alertNew, bool baseline, string action)
+        private void HandleCheckResult(MailCheckResult result, bool alertNew, bool baseline, string action, bool collectForQuarterWindow)
         {
             PopulateMessages(result.Messages);
             if (baseline)
             {
                 lastSeenUid = result.LatestUid;
                 monitoring = true;
-                pollTimer.Interval = ImmediatePollIntervalMs;
+                pollTimer.Interval = QuarterWindowPollIntervalMs;
                 pollTimer.Start();
                 startButton.Text = "停止监听";
                 statusLight.StatusText = "Watching";
                 ApplyTheme();
-                SetStatus("监听中。当前最新 UID：" + lastSeenUid + "。每 " + ImmediatePollIntervalSeconds + " 秒即时扫描并合并推送。");
+                SetStatus("监听中。当前最新 UID：" + lastSeenUid + "。仅在 00/15/30/45 分的一分钟窗口内持续扫描。");
                 WriteActivityLog(action + " baseline established; latestUid=" + lastSeenUid + "; messages=" + result.Messages.Count);
                 return;
             }
@@ -1490,6 +1541,12 @@ namespace SimpleMailReminder
             if (result.LatestUid > lastSeenUid) lastSeenUid = result.LatestUid;
             if (alertNew && fresh.Count > 0)
             {
+                if (collectForQuarterWindow)
+                {
+                    AddToQuarterWindowBatch(fresh, action);
+                    return;
+                }
+
                 foreach (MessageInfo message in fresh) pendingAlerts.Enqueue(message);
                 ShowNextPendingAlert();
                 statusLight.StatusText = "Alert";
@@ -1499,10 +1556,69 @@ namespace SimpleMailReminder
                 return;
             }
 
+            if (collectForQuarterWindow)
+            {
+                HandleQuietQuarterWindowScan(action);
+                return;
+            }
+
             statusLight.StatusText = monitoring ? "Watching" : "Idle";
             ApplyTheme();
             SetStatus(action + "完成，没有新邮件。最新 UID：" + lastSeenUid + "。");
             WriteActivityLog(action + " completed no new mail; latestUid=" + lastSeenUid + "; messages=" + result.Messages.Count);
+        }
+
+        private void AddToQuarterWindowBatch(List<MessageInfo> fresh, string action)
+        {
+            quarterWindowBatch.AddRange(fresh);
+            quietWindowScans = 0;
+            statusLight.StatusText = "Collecting";
+            ApplyTheme();
+            SetStatus("窗口内已收集 " + quarterWindowBatch.Count + " 封新邮件，继续等待后续邮件。");
+            WriteActivityLog(action + " collected new mail count=" + fresh.Count + "; windowBatch=" + quarterWindowBatch.Count + "; latestUid=" + lastSeenUid);
+        }
+
+        private void HandleQuietQuarterWindowScan(string action)
+        {
+            if (quarterWindowBatch.Count == 0)
+            {
+                statusLight.StatusText = "Watching";
+                ApplyTheme();
+                SetStatus(action + "完成，窗口内暂无新邮件。最新 UID：" + lastSeenUid + "。");
+                WriteActivityLog(action + " window quiet without batch; latestUid=" + lastSeenUid);
+                return;
+            }
+
+            quietWindowScans++;
+            if (quietWindowScans >= QuietScansBeforeWindowAlert)
+            {
+                FlushQuarterWindowBatch("新增停止");
+                return;
+            }
+
+            statusLight.StatusText = "Collecting";
+            ApplyTheme();
+            SetStatus("窗口内已收集 " + quarterWindowBatch.Count + " 封新邮件，等待后续邮件停止。");
+            WriteActivityLog(action + " quiet scan " + quietWindowScans + "/" + QuietScansBeforeWindowAlert + "; windowBatch=" + quarterWindowBatch.Count);
+        }
+
+        private void FlushQuarterWindowBatch(string reason)
+        {
+            if (quarterWindowBatch.Count == 0) return;
+
+            List<MessageInfo> batch = quarterWindowBatch.OrderBy(m => m.Uid).ToList();
+            foreach (MessageInfo message in batch) pendingAlerts.Enqueue(message);
+            quarterWindowBatch.Clear();
+            quietWindowScans = 0;
+            if (!string.IsNullOrEmpty(activeQuarterSlotKey))
+            {
+                flushedQuarterSlotKey = activeQuarterSlotKey;
+            }
+            ShowNextPendingAlert();
+            statusLight.StatusText = "Alert";
+            ApplyTheme();
+            SetStatus("窗口扫描完成，合并推送 " + batch.Count + " 封新邮件。");
+            WriteActivityLog("quarter window flushed reason=" + reason + "; batch=" + batch.Count + "; slot=" + activeQuarterSlotKey);
         }
 
         private void PopulateMessages(List<MessageInfo> messages)
@@ -1714,6 +1830,8 @@ namespace SimpleMailReminder
     {
         public static void Run()
         {
+            VerifyQuarterWindowSchedule();
+
             AppSettings settings = new AppSettings();
             settings.Provider = "qq";
             settings.Email = "smoke@example.com";
@@ -1730,6 +1848,19 @@ namespace SimpleMailReminder
             {
                 throw new InvalidOperationException("settings smoke test failed");
             }
+        }
+
+        private static void VerifyQuarterWindowSchedule()
+        {
+            DateTime slotStart = new DateTime(2026, 5, 28, 10, 15, 0);
+            DateTime slotEnd = new DateTime(2026, 5, 28, 10, 15, 59);
+            DateTime beforeSlot = new DateTime(2026, 5, 28, 10, 14, 59);
+            DateTime afterSlot = new DateTime(2026, 5, 28, 10, 16, 0);
+
+            if (MainForm.GetQuarterWindowSlotKey(slotStart) != "202605281015") throw new InvalidOperationException("quarter window start failed");
+            if (MainForm.GetQuarterWindowSlotKey(slotEnd) != "202605281015") throw new InvalidOperationException("quarter window end failed");
+            if (MainForm.GetQuarterWindowSlotKey(beforeSlot) != "") throw new InvalidOperationException("quarter window before-slot failed");
+            if (MainForm.GetQuarterWindowSlotKey(afterSlot) != "") throw new InvalidOperationException("quarter window after-slot failed");
         }
     }
 }
