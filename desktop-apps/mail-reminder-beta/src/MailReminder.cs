@@ -418,21 +418,34 @@ namespace SimpleMailReminder
 
         public static MailCheckResult Fetch(AppSettings settings, int limit)
         {
+            return Fetch(settings, limit, 0);
+        }
+
+        public static MailCheckResult Fetch(AppSettings settings, int limit, long sinceUid)
+        {
             using (ImapMailClient client = new ImapMailClient(settings.Host, settings.Port))
             {
                 client.EnsureOk(client.Command("LOGIN " + Quote(settings.Email) + " " + Quote(settings.Password)), "登录失败");
                 client.EnsureOk(client.Command("EXAMINE " + Quote(settings.Mailbox)), "打开邮箱失败");
-                string search = client.Command("UID SEARCH ALL");
+                string search = sinceUid > 0
+                    ? client.Command("UID SEARCH UID " + (sinceUid + 1) + ":*")
+                    : client.Command("UID SEARCH ALL");
                 List<long> uids = ParseSearchUids(search);
                 MailCheckResult result = new MailCheckResult();
                 if (uids.Count == 0)
                 {
+                    result.LatestUid = sinceUid;
                     client.Command("LOGOUT");
                     return result;
                 }
 
                 result.LatestUid = uids.Max();
-                foreach (long uid in uids.OrderByDescending(x => x).Take(limit))
+                IEnumerable<long> selected = uids.OrderByDescending(x => x);
+                if (limit > 0)
+                {
+                    selected = selected.Take(limit);
+                }
+                foreach (long uid in selected)
                 {
                     result.Messages.Add(client.FetchHeader(uid));
                 }
@@ -679,16 +692,21 @@ namespace SimpleMailReminder
     internal sealed class AlertForm : Form
     {
         private readonly AppSettings settings;
-        private readonly MessageInfo message;
+        private readonly List<MessageInfo> messages;
         private readonly Action onAcknowledged;
         private readonly Timer beepTimer = new Timer();
         private SoundPlayer player;
         private bool acknowledged;
 
         public AlertForm(AppSettings settings, MessageInfo message, Action onAcknowledged)
+            : this(settings, new List<MessageInfo> { message }, onAcknowledged)
+        {
+        }
+
+        public AlertForm(AppSettings settings, List<MessageInfo> messages, Action onAcknowledged)
         {
             this.settings = settings;
-            this.message = message;
+            this.messages = messages ?? new List<MessageInfo>();
             this.onAcknowledged = onAcknowledged;
             BuildUi();
             StartSound();
@@ -724,7 +742,7 @@ namespace SimpleMailReminder
             Controls.Add(top);
 
             Label title = new Label();
-            title.Text = "NEW MAIL LOCKED";
+            title.Text = messages.Count > 1 ? "NEW MAIL BATCH" : "NEW MAIL LOCKED";
             title.Font = new Font("Segoe UI", 16, FontStyle.Bold);
             title.ForeColor = theme.Accent;
             title.Left = 28;
@@ -734,7 +752,7 @@ namespace SimpleMailReminder
             top.Controls.Add(title);
 
             Label rule = new Label();
-            rule.Text = "必须打开邮箱网页，弹窗和提示音才会停止";
+            rule.Text = "本轮 " + Math.Max(1, messages.Count) + " 封新邮件；必须打开邮箱网页才会停止提醒";
             rule.ForeColor = theme.Accent2;
             rule.Left = 30;
             rule.Top = 54;
@@ -742,9 +760,19 @@ namespace SimpleMailReminder
             rule.Height = 22;
             top.Controls.Add(rule);
 
-            Controls.Add(CreateInfo("发件人", message.From, 108, theme));
-            Controls.Add(CreateInfo("主题", message.Subject, 150, theme));
-            Controls.Add(CreateInfo("时间", message.Date, 192, theme));
+            ListBox batchList = new ListBox();
+            batchList.Left = 30;
+            batchList.Top = 108;
+            batchList.Width = 426;
+            batchList.Height = 124;
+            batchList.BackColor = theme.Surface;
+            batchList.ForeColor = theme.Text;
+            batchList.BorderStyle = BorderStyle.FixedSingle;
+            foreach (MessageInfo item in this.messages)
+            {
+                batchList.Items.Add(item.From + " | " + item.Subject);
+            }
+            Controls.Add(batchList);
 
             Button open = new Button();
             open.Text = "查阅邮箱并停止提醒";
@@ -880,6 +908,7 @@ namespace SimpleMailReminder
         private readonly List<Label> labels = new List<Label>();
         private readonly List<Button> buttons = new List<Button>();
         private readonly List<SectionPanel> sections = new List<SectionPanel>();
+        private const int QuarterPollIntervalMs = 10000;
         private ComboBox themeBox;
         private ComboBox providerBox;
         private TextBox emailBox;
@@ -905,6 +934,7 @@ namespace SimpleMailReminder
         private bool checking;
         private bool monitoring;
         private bool exitRequested;
+        private string lastScanSlotKey = "";
         private long lastSeenUid;
         private int rgbHue;
         private AlertForm activeAlert;
@@ -914,7 +944,7 @@ namespace SimpleMailReminder
             BuildProviders();
             BuildUi();
             LoadSettings(AppSettings.Load());
-            pollTimer.Tick += delegate { CheckMail(true, false, "自动查收"); };
+            pollTimer.Tick += delegate { RunQuarterScanIfDue(); };
             themeTimer.Interval = 90;
             themeTimer.Tick += delegate
             {
@@ -1035,8 +1065,9 @@ namespace SimpleMailReminder
             intervalBox = new NumericUpDown();
             intervalBox.Minimum = 15;
             intervalBox.Maximum = 3600;
-            intervalBox.Value = 60;
-            AddField(settingsPanel, "监听间隔", intervalBox, left, top + row * 6, 104, 112);
+            intervalBox.Value = 900;
+            intervalBox.Enabled = false;
+            AddField(settingsPanel, "固定扫描", intervalBox, left, top + row * 6, 104, 112);
 
             soundBox = new TextBox();
             AddField(settingsPanel, "提示音 WAV", soundBox, left, top + row * 7, 104, 218);
@@ -1285,7 +1316,7 @@ namespace SimpleMailReminder
             portBox.Text = settings.Port.ToString();
             mailboxBox.Text = settings.Mailbox;
             webmailBox.Text = settings.WebmailUrl;
-            intervalBox.Value = Math.Min(intervalBox.Maximum, Math.Max(intervalBox.Minimum, settings.IntervalSeconds));
+            intervalBox.Value = 900;
             soundBox.Text = settings.SoundPath;
         }
 
@@ -1376,10 +1407,37 @@ namespace SimpleMailReminder
             AppSettings settings = ReadSettings();
             if (!ValidateSettings(settings)) return;
             settings.Save();
-            pollTimer.Interval = settings.IntervalSeconds * 1000;
+            pollTimer.Interval = QuarterPollIntervalMs;
             pendingAlerts.Clear();
             lastSeenUid = 0;
+            lastScanSlotKey = CurrentQuarterSlotKey(DateTime.Now);
             CheckMail(false, true, "启动监听");
+        }
+
+        private void RunQuarterScanIfDue()
+        {
+            if (!monitoring) return;
+
+            DateTime now = DateTime.Now;
+            if (!IsQuarterMinute(now)) return;
+
+            string slotKey = CurrentQuarterSlotKey(now);
+            if (slotKey == lastScanSlotKey) return;
+
+            lastScanSlotKey = slotKey;
+            WriteActivityLog("quarter scan due slot=" + slotKey);
+            CheckMail(true, false, "定点扫描 " + now.ToString("HH:mm"));
+        }
+
+        private static bool IsQuarterMinute(DateTime time)
+        {
+            return time.Minute == 0 || time.Minute == 15 || time.Minute == 30 || time.Minute == 45;
+        }
+
+        private static string CurrentQuarterSlotKey(DateTime time)
+        {
+            if (!IsQuarterMinute(time)) return "";
+            return time.ToString("yyyyMMddHHmm");
         }
 
         private void CheckMail(bool alertNew, bool baseline, string action)
@@ -1399,8 +1457,10 @@ namespace SimpleMailReminder
             ApplyTheme();
             SetStatus(action + "中...");
             WriteActivityLog(action + " start; baseline=" + baseline + "; alertNew=" + alertNew + "; lastSeenUid=" + lastSeenUid);
+            long sinceUid = alertNew && !baseline ? lastSeenUid : 0;
+            int fetchLimit = sinceUid > 0 ? 0 : 20;
 
-            Task.Factory.StartNew(delegate { return ImapMailClient.Fetch(settings, 20); })
+            Task.Factory.StartNew(delegate { return ImapMailClient.Fetch(settings, fetchLimit, sinceUid); })
                 .ContinueWith(delegate(Task<MailCheckResult> task)
                 {
                     BeginInvoke(new Action(delegate
@@ -1427,12 +1487,12 @@ namespace SimpleMailReminder
             {
                 lastSeenUid = result.LatestUid;
                 monitoring = true;
-                pollTimer.Interval = ((int)intervalBox.Value) * 1000;
+                pollTimer.Interval = QuarterPollIntervalMs;
                 pollTimer.Start();
                 startButton.Text = "停止监听";
                 statusLight.StatusText = "Watching";
                 ApplyTheme();
-                SetStatus("监听中。当前最新 UID：" + lastSeenUid + "。只提醒之后新收到的邮件。");
+                SetStatus("监听中。当前最新 UID：" + lastSeenUid + "。只在每小时 00/15/30/45 扫描并合并推送。");
                 WriteActivityLog(action + " baseline established; latestUid=" + lastSeenUid + "; messages=" + result.Messages.Count);
                 return;
             }
@@ -1456,7 +1516,7 @@ namespace SimpleMailReminder
                 statusLight.StatusText = "Alert";
                 ApplyTheme();
                 SetStatus("发现 " + fresh.Count + " 封新邮件，提醒已触发。");
-                WriteActivityLog(action + " detected new mail count=" + fresh.Count + "; latestUid=" + lastSeenUid);
+                WriteActivityLog(action + " detected new mail count=" + fresh.Count + "; latestUid=" + lastSeenUid + "; batched=true");
                 return;
             }
 
@@ -1488,12 +1548,12 @@ namespace SimpleMailReminder
         private void ShowNextPendingAlert()
         {
             if (activeAlert != null || pendingAlerts.Count == 0) return;
-            MessageInfo next = pendingAlerts.Peek();
-            ShowTrayNotification(next);
-            WriteActivityLog("alert displayed uid=" + next.Uid + "; subject=" + next.Subject);
-            activeAlert = new AlertForm(ReadSettings(), next, delegate
+            List<MessageInfo> batch = pendingAlerts.ToList();
+            ShowTrayNotification(batch);
+            WriteActivityLog("alert displayed batch count=" + batch.Count + "; uidRange=" + batch.Min(m => m.Uid) + "-" + batch.Max(m => m.Uid));
+            activeAlert = new AlertForm(ReadSettings(), batch, delegate
             {
-                if (pendingAlerts.Count > 0)
+                for (int i = 0; i < batch.Count && pendingAlerts.Count > 0; i++)
                 {
                     pendingAlerts.Dequeue();
                 }
@@ -1507,21 +1567,38 @@ namespace SimpleMailReminder
             activeAlert.BringToFront();
         }
 
-        private void ShowTrayNotification(MessageInfo message)
+        private void ShowTrayNotification(List<MessageInfo> messages)
         {
             if (trayIcon == null) return;
             try
             {
                 trayIcon.Visible = true;
                 trayIcon.BalloonTipIcon = ToolTipIcon.Info;
-                trayIcon.BalloonTipTitle = "IKUNANCE 新邮件";
-                trayIcon.BalloonTipText = TrimBalloonText(message.From + Environment.NewLine + message.Subject);
+                trayIcon.BalloonTipTitle = "IKUNANCE 新邮件 " + messages.Count + " 封";
+                trayIcon.BalloonTipText = TrimBalloonText(BuildBatchSummary(messages));
                 trayIcon.ShowBalloonTip(15000);
             }
             catch (Exception ex)
             {
                 WriteActivityLog("tray notification failed: " + ex.Message);
             }
+        }
+
+        private static string BuildBatchSummary(List<MessageInfo> messages)
+        {
+            if (messages == null || messages.Count == 0) return "";
+            StringBuilder builder = new StringBuilder();
+            foreach (MessageInfo message in messages.Take(5))
+            {
+                if (builder.Length > 0) builder.AppendLine();
+                builder.Append(message.From).Append(" | ").Append(message.Subject);
+            }
+            if (messages.Count > 5)
+            {
+                builder.AppendLine();
+                builder.Append("还有 ").Append(messages.Count - 5).Append(" 封新邮件");
+            }
+            return builder.ToString();
         }
 
         private static string TrimBalloonText(string value)
