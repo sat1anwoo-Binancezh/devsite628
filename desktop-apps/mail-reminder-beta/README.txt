@@ -14,3 +14,5 @@
 - 配置会保存到当前 Windows 用户目录：%APPDATA%\IKUNANCE\MailReminderBeta\settings.cfg
 - 窗口外框会在支持的 Windows 版本上尝试启用 Acrylic 模糊；内容区保持深色监控台主题。
 - 最小化或点击窗口关闭按钮会隐藏到 Windows 右下角托盘；双击托盘图标可恢复，右键菜单可退出程序。
+- 检测到新邮件时会同时触发托盘气泡通知、强制确认弹窗和循环提示音。
+- 运行日志：%APPDATA%\IKUNANCE\MailReminderBeta\activity.log

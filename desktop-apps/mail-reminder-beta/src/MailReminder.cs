@@ -287,6 +287,11 @@ namespace SimpleMailReminder
             get { return Path.Combine(ConfigDirectory, "settings.cfg"); }
         }
 
+        public static string LogPath
+        {
+            get { return Path.Combine(ConfigDirectory, "activity.log"); }
+        }
+
         private static string LegacyConfigPath
         {
             get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "MailReminderBeta.config"); }
@@ -1393,6 +1398,7 @@ namespace SimpleMailReminder
             statusLight.StatusText = "Checking";
             ApplyTheme();
             SetStatus(action + "中...");
+            WriteActivityLog(action + " start; baseline=" + baseline + "; alertNew=" + alertNew + "; lastSeenUid=" + lastSeenUid);
 
             Task.Factory.StartNew(delegate { return ImapMailClient.Fetch(settings, 20); })
                 .ContinueWith(delegate(Task<MailCheckResult> task)
@@ -1406,6 +1412,7 @@ namespace SimpleMailReminder
                             statusLight.StatusText = monitoring ? "Watching" : "Idle";
                             ApplyTheme();
                             SetStatus("查收失败：" + task.Exception.GetBaseException().Message);
+                            WriteActivityLog(action + " failed: " + task.Exception.GetBaseException().Message);
                             return;
                         }
                         HandleCheckResult(task.Result, alertNew, baseline, action);
@@ -1426,6 +1433,7 @@ namespace SimpleMailReminder
                 statusLight.StatusText = "Watching";
                 ApplyTheme();
                 SetStatus("监听中。当前最新 UID：" + lastSeenUid + "。只提醒之后新收到的邮件。");
+                WriteActivityLog(action + " baseline established; latestUid=" + lastSeenUid + "; messages=" + result.Messages.Count);
                 return;
             }
 
@@ -1435,6 +1443,7 @@ namespace SimpleMailReminder
                 statusLight.StatusText = monitoring ? "Watching" : "Idle";
                 ApplyTheme();
                 SetStatus(action + "完成。最新 UID：" + lastSeenUid + "。");
+                WriteActivityLog(action + " completed initial latestUid=" + lastSeenUid + "; messages=" + result.Messages.Count);
                 return;
             }
 
@@ -1447,12 +1456,14 @@ namespace SimpleMailReminder
                 statusLight.StatusText = "Alert";
                 ApplyTheme();
                 SetStatus("发现 " + fresh.Count + " 封新邮件，提醒已触发。");
+                WriteActivityLog(action + " detected new mail count=" + fresh.Count + "; latestUid=" + lastSeenUid);
                 return;
             }
 
             statusLight.StatusText = monitoring ? "Watching" : "Idle";
             ApplyTheme();
             SetStatus(action + "完成，没有新邮件。最新 UID：" + lastSeenUid + "。");
+            WriteActivityLog(action + " completed no new mail; latestUid=" + lastSeenUid + "; messages=" + result.Messages.Count);
         }
 
         private void PopulateMessages(List<MessageInfo> messages)
@@ -1477,15 +1488,46 @@ namespace SimpleMailReminder
         private void ShowNextPendingAlert()
         {
             if (activeAlert != null || pendingAlerts.Count == 0) return;
-            MessageInfo next = pendingAlerts.Dequeue();
+            MessageInfo next = pendingAlerts.Peek();
+            ShowTrayNotification(next);
+            WriteActivityLog("alert displayed uid=" + next.Uid + "; subject=" + next.Subject);
             activeAlert = new AlertForm(ReadSettings(), next, delegate
             {
+                if (pendingAlerts.Count > 0)
+                {
+                    pendingAlerts.Dequeue();
+                }
                 activeAlert = null;
                 statusLight.StatusText = monitoring ? "Watching" : "Idle";
                 ApplyTheme();
                 ShowNextPendingAlert();
             });
             activeAlert.Show();
+            activeAlert.Activate();
+            activeAlert.BringToFront();
+        }
+
+        private void ShowTrayNotification(MessageInfo message)
+        {
+            if (trayIcon == null) return;
+            try
+            {
+                trayIcon.Visible = true;
+                trayIcon.BalloonTipIcon = ToolTipIcon.Info;
+                trayIcon.BalloonTipTitle = "IKUNANCE 新邮件";
+                trayIcon.BalloonTipText = TrimBalloonText(message.From + Environment.NewLine + message.Subject);
+                trayIcon.ShowBalloonTip(15000);
+            }
+            catch (Exception ex)
+            {
+                WriteActivityLog("tray notification failed: " + ex.Message);
+            }
+        }
+
+        private static string TrimBalloonText(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            return value.Length <= 220 ? value : value.Substring(0, 217) + "...";
         }
 
         private void OpenWebmail()
@@ -1587,6 +1629,18 @@ namespace SimpleMailReminder
         private void SetStatus(string text)
         {
             statusLabel.Text = DateTime.Now.ToString("HH:mm:ss") + "  " + text;
+        }
+
+        private static void WriteActivityLog(string text)
+        {
+            try
+            {
+                Directory.CreateDirectory(AppSettings.ConfigDirectory);
+                File.AppendAllText(AppSettings.LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + text + Environment.NewLine, Encoding.UTF8);
+            }
+            catch
+            {
+            }
         }
 
         private static void SetDoubleBuffered(Control control)
