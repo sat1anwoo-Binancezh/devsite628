@@ -273,7 +273,7 @@ namespace SimpleMailReminder
         public int Port = 993;
         public string Mailbox = "INBOX";
         public string WebmailUrl = "https://mail.qq.com/";
-        public int IntervalSeconds = 60;
+        public int IntervalSeconds = 10;
         public string SoundPath = "";
         public string Theme = "ikun";
 
@@ -316,7 +316,7 @@ namespace SimpleMailReminder
                 if (key == "Port") settings.Port = ToInt(value, 993);
                 if (key == "Mailbox") settings.Mailbox = value;
                 if (key == "WebmailUrl") settings.WebmailUrl = value;
-                if (key == "IntervalSeconds") settings.IntervalSeconds = ToInt(value, 60);
+                if (key == "IntervalSeconds") settings.IntervalSeconds = ToInt(value, 10);
                 if (key == "SoundPath") settings.SoundPath = value;
                 if (key == "Theme") settings.Theme = value;
             }
@@ -908,7 +908,8 @@ namespace SimpleMailReminder
         private readonly List<Label> labels = new List<Label>();
         private readonly List<Button> buttons = new List<Button>();
         private readonly List<SectionPanel> sections = new List<SectionPanel>();
-        private const int QuarterPollIntervalMs = 10000;
+        private const int ImmediatePollIntervalSeconds = 10;
+        private const int ImmediatePollIntervalMs = ImmediatePollIntervalSeconds * 1000;
         private ComboBox themeBox;
         private ComboBox providerBox;
         private TextBox emailBox;
@@ -934,7 +935,6 @@ namespace SimpleMailReminder
         private bool checking;
         private bool monitoring;
         private bool exitRequested;
-        private string lastScanSlotKey = "";
         private long lastSeenUid;
         private int rgbHue;
         private AlertForm activeAlert;
@@ -944,7 +944,13 @@ namespace SimpleMailReminder
             BuildProviders();
             BuildUi();
             LoadSettings(AppSettings.Load());
-            pollTimer.Tick += delegate { RunQuarterScanIfDue(); };
+            pollTimer.Tick += delegate
+            {
+                if (monitoring && !checking)
+                {
+                    CheckMail(true, false, "即时扫描");
+                }
+            };
             themeTimer.Interval = 90;
             themeTimer.Tick += delegate
             {
@@ -1063,11 +1069,11 @@ namespace SimpleMailReminder
             AddField(settingsPanel, "查阅链接", webmailBox, left, top + row * 5, 104, 300);
 
             intervalBox = new NumericUpDown();
-            intervalBox.Minimum = 15;
+            intervalBox.Minimum = 10;
             intervalBox.Maximum = 3600;
-            intervalBox.Value = 900;
+            intervalBox.Value = ImmediatePollIntervalSeconds;
             intervalBox.Enabled = false;
-            AddField(settingsPanel, "固定扫描", intervalBox, left, top + row * 6, 104, 112);
+            AddField(settingsPanel, "即时扫描", intervalBox, left, top + row * 6, 104, 112);
 
             soundBox = new TextBox();
             AddField(settingsPanel, "提示音 WAV", soundBox, left, top + row * 7, 104, 218);
@@ -1316,7 +1322,7 @@ namespace SimpleMailReminder
             portBox.Text = settings.Port.ToString();
             mailboxBox.Text = settings.Mailbox;
             webmailBox.Text = settings.WebmailUrl;
-            intervalBox.Value = 900;
+            intervalBox.Value = ImmediatePollIntervalSeconds;
             soundBox.Text = settings.SoundPath;
         }
 
@@ -1407,37 +1413,10 @@ namespace SimpleMailReminder
             AppSettings settings = ReadSettings();
             if (!ValidateSettings(settings)) return;
             settings.Save();
-            pollTimer.Interval = QuarterPollIntervalMs;
+            pollTimer.Interval = ImmediatePollIntervalMs;
             pendingAlerts.Clear();
             lastSeenUid = 0;
-            lastScanSlotKey = CurrentQuarterSlotKey(DateTime.Now);
             CheckMail(false, true, "启动监听");
-        }
-
-        private void RunQuarterScanIfDue()
-        {
-            if (!monitoring) return;
-
-            DateTime now = DateTime.Now;
-            if (!IsQuarterMinute(now)) return;
-
-            string slotKey = CurrentQuarterSlotKey(now);
-            if (slotKey == lastScanSlotKey) return;
-
-            lastScanSlotKey = slotKey;
-            WriteActivityLog("quarter scan due slot=" + slotKey);
-            CheckMail(true, false, "定点扫描 " + now.ToString("HH:mm"));
-        }
-
-        private static bool IsQuarterMinute(DateTime time)
-        {
-            return time.Minute == 0 || time.Minute == 15 || time.Minute == 30 || time.Minute == 45;
-        }
-
-        private static string CurrentQuarterSlotKey(DateTime time)
-        {
-            if (!IsQuarterMinute(time)) return "";
-            return time.ToString("yyyyMMddHHmm");
         }
 
         private void CheckMail(bool alertNew, bool baseline, string action)
@@ -1487,12 +1466,12 @@ namespace SimpleMailReminder
             {
                 lastSeenUid = result.LatestUid;
                 monitoring = true;
-                pollTimer.Interval = QuarterPollIntervalMs;
+                pollTimer.Interval = ImmediatePollIntervalMs;
                 pollTimer.Start();
                 startButton.Text = "停止监听";
                 statusLight.StatusText = "Watching";
                 ApplyTheme();
-                SetStatus("监听中。当前最新 UID：" + lastSeenUid + "。只在每小时 00/15/30/45 扫描并合并推送。");
+                SetStatus("监听中。当前最新 UID：" + lastSeenUid + "。每 " + ImmediatePollIntervalSeconds + " 秒即时扫描并合并推送。");
                 WriteActivityLog(action + " baseline established; latestUid=" + lastSeenUid + "; messages=" + result.Messages.Count);
                 return;
             }
